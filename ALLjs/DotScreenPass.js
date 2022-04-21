@@ -1,58 +1,49 @@
-import {
-	ShaderMaterial,
-	UniformsUtils
-} from 'three';
-import { Pass, FullScreenQuad } from './Pass.js';
-import { DotScreenShader } from '../shaders/DotScreenShader.js';
+( function () {
 
-class DotScreenPass extends Pass {
+	class DotScreenPass extends THREE.Pass {
 
-	constructor( center, angle, scale ) {
+		constructor( center, angle, scale ) {
 
-		super();
+			super();
+			if ( THREE.DotScreenShader === undefined ) console.error( 'THREE.DotScreenPass relies on THREE.DotScreenShader' );
+			const shader = THREE.DotScreenShader;
+			this.uniforms = THREE.UniformsUtils.clone( shader.uniforms );
+			if ( center !== undefined ) this.uniforms[ 'center' ].value.copy( center );
+			if ( angle !== undefined ) this.uniforms[ 'angle' ].value = angle;
+			if ( scale !== undefined ) this.uniforms[ 'scale' ].value = scale;
+			this.material = new THREE.ShaderMaterial( {
+				uniforms: this.uniforms,
+				vertexShader: shader.vertexShader,
+				fragmentShader: shader.fragmentShader
+			} );
+			this.fsQuad = new THREE.FullScreenQuad( this.material );
 
-		if ( DotScreenShader === undefined ) console.error( 'THREE.DotScreenPass relies on DotScreenShader' );
+		}
 
-		const shader = DotScreenShader;
+		render( renderer, writeBuffer, readBuffer
+			/*, deltaTime, maskActive */
+		) {
 
-		this.uniforms = UniformsUtils.clone( shader.uniforms );
+			this.uniforms[ 'tDiffuse' ].value = readBuffer.texture;
+			this.uniforms[ 'tSize' ].value.set( readBuffer.width, readBuffer.height );
 
-		if ( center !== undefined ) this.uniforms[ 'center' ].value.copy( center );
-		if ( angle !== undefined ) this.uniforms[ 'angle' ].value = angle;
-		if ( scale !== undefined ) this.uniforms[ 'scale' ].value = scale;
+			if ( this.renderToScreen ) {
 
-		this.material = new ShaderMaterial( {
+				renderer.setRenderTarget( null );
+				this.fsQuad.render( renderer );
 
-			uniforms: this.uniforms,
-			vertexShader: shader.vertexShader,
-			fragmentShader: shader.fragmentShader
+			} else {
 
-		} );
+				renderer.setRenderTarget( writeBuffer );
+				if ( this.clear ) renderer.clear();
+				this.fsQuad.render( renderer );
 
-		this.fsQuad = new FullScreenQuad( this.material );
-
-	}
-
-	render( renderer, writeBuffer, readBuffer /*, deltaTime, maskActive */ ) {
-
-		this.uniforms[ 'tDiffuse' ].value = readBuffer.texture;
-		this.uniforms[ 'tSize' ].value.set( readBuffer.width, readBuffer.height );
-
-		if ( this.renderToScreen ) {
-
-			renderer.setRenderTarget( null );
-			this.fsQuad.render( renderer );
-
-		} else {
-
-			renderer.setRenderTarget( writeBuffer );
-			if ( this.clear ) renderer.clear();
-			this.fsQuad.render( renderer );
+			}
 
 		}
 
 	}
 
-}
+	THREE.DotScreenPass = DotScreenPass;
 
-export { DotScreenPass };
+} )();

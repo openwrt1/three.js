@@ -1,8 +1,6 @@
-import {
-	Vector2
-} from 'three';
+( function () {
 
-/**
+	/**
  * Triangle blur shader
  * based on glfx.js triangle blur shader
  * https://github.com/evanw/glfx.js
@@ -12,16 +10,18 @@ import {
  * perpendicular triangle filters.
  */
 
-const TriangleBlurShader = {
-
-	uniforms: {
-
-		'texture': { value: null },
-		'delta': { value: new Vector2( 1, 1 ) }
-
-	},
-
-	vertexShader: /* glsl */`
+	const TriangleBlurShader = {
+		uniforms: {
+			'texture': {
+				value: null
+			},
+			'delta': {
+				value: new THREE.Vector2( 1, 1 )
+			}
+		},
+		vertexShader:
+  /* glsl */
+  `
 
 		varying vec2 vUv;
 
@@ -31,8 +31,9 @@ const TriangleBlurShader = {
 			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 
 		}`,
-
-	fragmentShader: /* glsl */`
+		fragmentShader:
+  /* glsl */
+  `
 
 		#include <common>
 
@@ -66,7 +67,8 @@ const TriangleBlurShader = {
 			gl_FragColor = color / total;
 
 		}`
+	};
 
-};
+	THREE.TriangleBlurShader = TriangleBlurShader;
 
-export { TriangleBlurShader };
+} )();

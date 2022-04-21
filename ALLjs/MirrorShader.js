@@ -1,20 +1,23 @@
-/**
+( function () {
+
+	/**
  * Mirror Shader
  * Copies half the input to the other half
  *
  * side: side of input to mirror (0 = left, 1 = right, 2 = top, 3 = bottom)
  */
-
-const MirrorShader = {
-
-	uniforms: {
-
-		'tDiffuse': { value: null },
-		'side': { value: 1 }
-
-	},
-
-	vertexShader: /* glsl */`
+	const MirrorShader = {
+		uniforms: {
+			'tDiffuse': {
+				value: null
+			},
+			'side': {
+				value: 1
+			}
+		},
+		vertexShader:
+  /* glsl */
+  `
 
 		varying vec2 vUv;
 
@@ -24,8 +27,9 @@ const MirrorShader = {
 			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 
 		}`,
-
-	fragmentShader: /* glsl */`
+		fragmentShader:
+  /* glsl */
+  `
 
 		uniform sampler2D tDiffuse;
 		uniform int side;
@@ -48,7 +52,8 @@ const MirrorShader = {
 			gl_FragColor = color;
 
 		}`
+	};
 
-};
+	THREE.MirrorShader = MirrorShader;
 
-export { MirrorShader };
+} )();

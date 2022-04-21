@@ -1,19 +1,22 @@
-/**
+( function () {
+
+	/**
  * Sepia tone shader
  * based on glfx.js sepia shader
  * https://github.com/evanw/glfx.js
  */
-
-const SepiaShader = {
-
-	uniforms: {
-
-		'tDiffuse': { value: null },
-		'amount': { value: 1.0 }
-
-	},
-
-	vertexShader: /* glsl */`
+	const SepiaShader = {
+		uniforms: {
+			'tDiffuse': {
+				value: null
+			},
+			'amount': {
+				value: 1.0
+			}
+		},
+		vertexShader:
+  /* glsl */
+  `
 
 		varying vec2 vUv;
 
@@ -23,8 +26,9 @@ const SepiaShader = {
 			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 
 		}`,
-
-	fragmentShader: /* glsl */`
+		fragmentShader:
+  /* glsl */
+  `
 
 		uniform float amount;
 
@@ -44,7 +48,8 @@ const SepiaShader = {
 			gl_FragColor = vec4( min( vec3( 1.0 ), color.rgb ), color.a );
 
 		}`
+	};
 
-};
+	THREE.SepiaShader = SepiaShader;
 
-export { SepiaShader };
+} )();

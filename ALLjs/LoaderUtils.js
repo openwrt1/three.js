@@ -1,75 +1,90 @@
-class LoaderUtils {
+const LoaderUtils = {
 
-	static decodeText( array ) {
+	createFilesMap: function ( files ) {
 
-		if ( typeof TextDecoder !== 'undefined' ) {
+		const map = {};
 
-			return new TextDecoder().decode( array );
+		for ( let i = 0; i < files.length; i ++ ) {
 
-		}
-
-		// Avoid the String.fromCharCode.apply(null, array) shortcut, which
-		// throws a "maximum call stack size exceeded" error for large arrays.
-
-		let s = '';
-
-		for ( let i = 0, il = array.length; i < il; i ++ ) {
-
-			// Implicitly assumes little-endian.
-			s += String.fromCharCode( array[ i ] );
+			const file = files[ i ];
+			map[ file.name ] = file;
 
 		}
 
-		try {
+		return map;
 
-			// merges multi-byte utf-8 characters.
+	},
 
-			return decodeURIComponent( escape( s ) );
+	getFilesFromItemList: function ( items, onDone ) {
 
-		} catch ( e ) { // see #16358
+		// TOFIX: setURLModifier() breaks when the file being loaded is not in root
 
-			return s;
+		let itemsCount = 0;
+		let itemsTotal = 0;
+
+		const files = [];
+		const filesMap = {};
+
+		function onEntryHandled() {
+
+			itemsCount ++;
+
+			if ( itemsCount === itemsTotal ) {
+
+				onDone( files, filesMap );
+
+			}
+
+		}
+
+		function handleEntry( entry ) {
+
+			if ( entry.isDirectory ) {
+
+				const reader = entry.createReader();
+				reader.readEntries( function ( entries ) {
+
+					for ( let i = 0; i < entries.length; i ++ ) {
+
+						handleEntry( entries[ i ] );
+
+					}
+
+					onEntryHandled();
+
+				} );
+
+			} else if ( entry.isFile ) {
+
+				entry.file( function ( file ) {
+
+					files.push( file );
+
+					filesMap[ entry.fullPath.slice( 1 ) ] = file;
+					onEntryHandled();
+
+				} );
+
+			}
+
+			itemsTotal ++;
+
+		}
+
+		for ( let i = 0; i < items.length; i ++ ) {
+
+			const item = items[ i ];
+
+			if ( item.kind === 'file' ) {
+
+				handleEntry( item.webkitGetAsEntry() );
+
+			}
 
 		}
 
 	}
 
-	static extractUrlBase( url ) {
-
-		const index = url.lastIndexOf( '/' );
-
-		if ( index === - 1 ) return './';
-
-		return url.slice( 0, index + 1 );
-
-	}
-
-	static resolveURL( url, path ) {
-
-		// Invalid URL
-		if ( typeof url !== 'string' || url === '' ) return '';
-
-		// Host Relative URL
-		if ( /^https?:\/\//i.test( path ) && /^\//.test( url ) ) {
-
-			path = path.replace( /(^https?:\/\/[^\/]+).*/i, '$1' );
-
-		}
-
-		// Absolute URL http://,https://,//
-		if ( /^(https?:)?\/\//i.test( url ) ) return url;
-
-		// Data URI
-		if ( /^data:.*,.*$/i.test( url ) ) return url;
-
-		// Blob URL
-		if ( /^blob:.*$/i.test( url ) ) return url;
-
-		// Relative URL
-		return path + url;
-
-	}
-
-}
+};
 
 export { LoaderUtils };

@@ -1,21 +1,21 @@
-import {
-	Color
-} from 'three';
+( function () {
 
-/**
+	/**
  * Colorify shader
  */
 
-const ColorifyShader = {
-
-	uniforms: {
-
-		'tDiffuse': { value: null },
-		'color': { value: new Color( 0xffffff ) }
-
-	},
-
-	vertexShader: /* glsl */`
+	const ColorifyShader = {
+		uniforms: {
+			'tDiffuse': {
+				value: null
+			},
+			'color': {
+				value: new THREE.Color( 0xffffff )
+			}
+		},
+		vertexShader:
+  /* glsl */
+  `
 
 		varying vec2 vUv;
 
@@ -25,8 +25,9 @@ const ColorifyShader = {
 			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 
 		}`,
-
-	fragmentShader: /* glsl */`
+		fragmentShader:
+  /* glsl */
+  `
 
 		uniform vec3 color;
 		uniform sampler2D tDiffuse;
@@ -43,7 +44,8 @@ const ColorifyShader = {
 			gl_FragColor = vec4( v * color, texel.w );
 
 		}`
+	};
 
-};
+	THREE.ColorifyShader = ColorifyShader;
 
-export { ColorifyShader };
+} )();

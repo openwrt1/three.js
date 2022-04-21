@@ -1,77 +1,75 @@
-import {
-	ShaderMaterial,
-	UniformsUtils
-} from 'three';
-import { Pass, FullScreenQuad } from './Pass.js';
-import { HalftoneShader } from '../shaders/HalftoneShader.js';
+( function () {
 
-/**
- * RGB Halftone pass for three.js effects composer. Requires HalftoneShader.
+	/**
+ * RGB Halftone pass for three.js effects composer. Requires THREE.HalftoneShader.
  */
 
-class HalftonePass extends Pass {
+	class HalftonePass extends THREE.Pass {
 
-	constructor( width, height, params ) {
+		constructor( width, height, params ) {
 
-		super();
+			super();
 
-	 	if ( HalftoneShader === undefined ) {
+			if ( THREE.HalftoneShader === undefined ) {
 
-	 		console.error( 'THREE.HalftonePass requires HalftoneShader' );
+				console.error( 'THREE.HalftonePass requires THREE.HalftoneShader' );
 
-	 	}
+			}
 
-	 	this.uniforms = UniformsUtils.clone( HalftoneShader.uniforms );
-	 	this.material = new ShaderMaterial( {
-	 		uniforms: this.uniforms,
-	 		fragmentShader: HalftoneShader.fragmentShader,
-	 		vertexShader: HalftoneShader.vertexShader
-	 	} );
+			this.uniforms = THREE.UniformsUtils.clone( THREE.HalftoneShader.uniforms );
+			this.material = new THREE.ShaderMaterial( {
+				uniforms: this.uniforms,
+				fragmentShader: THREE.HalftoneShader.fragmentShader,
+				vertexShader: THREE.HalftoneShader.vertexShader
+			} ); // set params
 
-		// set params
-		this.uniforms.width.value = width;
-		this.uniforms.height.value = height;
+			this.uniforms.width.value = width;
+			this.uniforms.height.value = height;
 
-		for ( const key in params ) {
+			for ( const key in params ) {
 
-			if ( params.hasOwnProperty( key ) && this.uniforms.hasOwnProperty( key ) ) {
+				if ( params.hasOwnProperty( key ) && this.uniforms.hasOwnProperty( key ) ) {
 
-				this.uniforms[ key ].value = params[ key ];
+					this.uniforms[ key ].value = params[ key ];
+
+				}
+
+			}
+
+			this.fsQuad = new THREE.FullScreenQuad( this.material );
+
+		}
+
+		render( renderer, writeBuffer, readBuffer
+			/*, deltaTime, maskActive*/
+		) {
+
+			this.material.uniforms[ 'tDiffuse' ].value = readBuffer.texture;
+
+			if ( this.renderToScreen ) {
+
+				renderer.setRenderTarget( null );
+				this.fsQuad.render( renderer );
+
+			} else {
+
+				renderer.setRenderTarget( writeBuffer );
+				if ( this.clear ) renderer.clear();
+				this.fsQuad.render( renderer );
 
 			}
 
 		}
 
-		this.fsQuad = new FullScreenQuad( this.material );
+		setSize( width, height ) {
 
-	}
-
-	render( renderer, writeBuffer, readBuffer/*, deltaTime, maskActive*/ ) {
-
- 		this.material.uniforms[ 'tDiffuse' ].value = readBuffer.texture;
-
- 		if ( this.renderToScreen ) {
-
- 			renderer.setRenderTarget( null );
- 			this.fsQuad.render( renderer );
-
-		} else {
-
- 			renderer.setRenderTarget( writeBuffer );
- 			if ( this.clear ) renderer.clear();
-			this.fsQuad.render( renderer );
+			this.uniforms.width.value = width;
+			this.uniforms.height.value = height;
 
 		}
 
- 	}
+	}
 
- 	setSize( width, height ) {
+	THREE.HalftonePass = HalftonePass;
 
- 		this.uniforms.width.value = width;
- 		this.uniforms.height.value = height;
-
- 	}
-
-}
-
-export { HalftonePass };
+} )();

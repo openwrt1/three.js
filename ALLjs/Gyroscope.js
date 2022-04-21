@@ -1,66 +1,60 @@
-import {
-	Object3D,
-	Quaternion,
-	Vector3
-} from 'three';
+( function () {
 
-const _translationObject = new Vector3();
-const _quaternionObject = new Quaternion();
-const _scaleObject = new Vector3();
+	const _translationObject = new THREE.Vector3();
 
-const _translationWorld = new Vector3();
-const _quaternionWorld = new Quaternion();
-const _scaleWorld = new Vector3();
+	const _quaternionObject = new THREE.Quaternion();
 
-class Gyroscope extends Object3D {
+	const _scaleObject = new THREE.Vector3();
 
-	constructor() {
+	const _translationWorld = new THREE.Vector3();
 
-		super();
+	const _quaternionWorld = new THREE.Quaternion();
 
-	}
+	const _scaleWorld = new THREE.Vector3();
 
-	updateMatrixWorld( force ) {
+	class Gyroscope extends THREE.Object3D {
 
-		this.matrixAutoUpdate && this.updateMatrix();
+		constructor() {
 
-		// update matrixWorld
+			super();
 
-		if ( this.matrixWorldNeedsUpdate || force ) {
+		}
 
-			if ( this.parent !== null ) {
+		updateMatrixWorld( force ) {
 
-				this.matrixWorld.multiplyMatrices( this.parent.matrixWorld, this.matrix );
+			this.matrixAutoUpdate && this.updateMatrix(); // update matrixWorld
 
-				this.matrixWorld.decompose( _translationWorld, _quaternionWorld, _scaleWorld );
-				this.matrix.decompose( _translationObject, _quaternionObject, _scaleObject );
+			if ( this.matrixWorldNeedsUpdate || force ) {
 
-				this.matrixWorld.compose( _translationWorld, _quaternionObject, _scaleWorld );
+				if ( this.parent !== null ) {
+
+					this.matrixWorld.multiplyMatrices( this.parent.matrixWorld, this.matrix );
+					this.matrixWorld.decompose( _translationWorld, _quaternionWorld, _scaleWorld );
+					this.matrix.decompose( _translationObject, _quaternionObject, _scaleObject );
+					this.matrixWorld.compose( _translationWorld, _quaternionObject, _scaleWorld );
+
+				} else {
+
+					this.matrixWorld.copy( this.matrix );
+
+				}
+
+				this.matrixWorldNeedsUpdate = false;
+				force = true;
+
+			} // update children
 
 
-			} else {
+			for ( let i = 0, l = this.children.length; i < l; i ++ ) {
 
-				this.matrixWorld.copy( this.matrix );
+				this.children[ i ].updateMatrixWorld( force );
 
 			}
 
-
-			this.matrixWorldNeedsUpdate = false;
-
-			force = true;
-
-		}
-
-		// update children
-
-		for ( let i = 0, l = this.children.length; i < l; i ++ ) {
-
-			this.children[ i ].updateMatrixWorld( force );
-
 		}
 
 	}
 
-}
+	THREE.Gyroscope = Gyroscope;
 
-export { Gyroscope };
+} )();

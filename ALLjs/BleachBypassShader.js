@@ -1,19 +1,22 @@
-/**
+( function () {
+
+	/**
  * Bleach bypass shader [http://en.wikipedia.org/wiki/Bleach_bypass]
  * - based on Nvidia example
  * http://developer.download.nvidia.com/shaderlibrary/webpages/shader_library.html#post_bleach_bypass
  */
-
-const BleachBypassShader = {
-
-	uniforms: {
-
-		'tDiffuse': { value: null },
-		'opacity': { value: 1.0 }
-
-	},
-
-	vertexShader: /* glsl */`
+	const BleachBypassShader = {
+		uniforms: {
+			'tDiffuse': {
+				value: null
+			},
+			'opacity': {
+				value: 1.0
+			}
+		},
+		vertexShader:
+  /* glsl */
+  `
 
 		varying vec2 vUv;
 
@@ -23,8 +26,9 @@ const BleachBypassShader = {
 			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 
 		}`,
-
-	fragmentShader: /* glsl */`
+		fragmentShader:
+  /* glsl */
+  `
 
 		uniform float opacity;
 
@@ -54,7 +58,8 @@ const BleachBypassShader = {
 			gl_FragColor = vec4( mixRGB, base.a );
 
 		}`
+	};
 
-};
+	THREE.BleachBypassShader = BleachBypassShader;
 
-export { BleachBypassShader };
+} )();

@@ -1,58 +1,86 @@
-import { Object3D } from '../core/Object3D.js';
+import * as THREE from '../../../build/three.module.js';
 
-class Scene extends Object3D {
+let camera, scene, renderer, group;
 
-	constructor() {
+function init( canvas, width, height, pixelRatio, path ) {
 
-		super();
+	camera = new THREE.PerspectiveCamera( 40, width / height, 1, 1000 );
+	camera.position.z = 200;
 
-		this.type = 'Scene';
+	scene = new THREE.Scene();
+	scene.fog = new THREE.Fog( 0x444466, 100, 400 );
+	scene.background = new THREE.Color( 0x444466 );
 
-		this.background = null;
-		this.environment = null;
-		this.fog = null;
+	group = new THREE.Group();
+	scene.add( group );
 
-		this.overrideMaterial = null;
+	// we don't use ImageLoader since it has a DOM dependency (HTML5 image element)
 
-		this.autoUpdate = true; // checked by the renderer
+	const loader = new THREE.ImageBitmapLoader().setPath( path );
+	loader.setOptions( { imageOrientation: 'flipY' } );
+	loader.load( 'textures/matcaps/matcap-porcelain-white.jpg', function ( imageBitmap ) {
 
-		if ( typeof __THREE_DEVTOOLS__ !== 'undefined' ) {
+		const texture = new THREE.CanvasTexture( imageBitmap );
 
-			__THREE_DEVTOOLS__.dispatchEvent( new CustomEvent( 'observe', { detail: this } ) );
+		const geometry = new THREE.IcosahedronGeometry( 5, 8 );
+		const materials = [
+			new THREE.MeshMatcapMaterial( { color: 0xaa24df, matcap: texture } ),
+			new THREE.MeshMatcapMaterial( { color: 0x605d90, matcap: texture } ),
+			new THREE.MeshMatcapMaterial( { color: 0xe04a3f, matcap: texture } ),
+			new THREE.MeshMatcapMaterial( { color: 0xe30456, matcap: texture } )
+		];
+
+		for ( let i = 0; i < 100; i ++ ) {
+
+			const material = materials[ i % materials.length ];
+			const mesh = new THREE.Mesh( geometry, material );
+			mesh.position.x = random() * 200 - 100;
+			mesh.position.y = random() * 200 - 100;
+			mesh.position.z = random() * 200 - 100;
+			mesh.scale.setScalar( random() + 1 );
+			group.add( mesh );
 
 		}
 
-	}
+		renderer = new THREE.WebGLRenderer( { antialias: true, canvas: canvas } );
+		renderer.setPixelRatio( pixelRatio );
+		renderer.setSize( width, height, false );
 
-	copy( source, recursive ) {
+		animate();
 
-		super.copy( source, recursive );
+	} );
 
-		if ( source.background !== null ) this.background = source.background.clone();
-		if ( source.environment !== null ) this.environment = source.environment.clone();
-		if ( source.fog !== null ) this.fog = source.fog.clone();
+}
 
-		if ( source.overrideMaterial !== null ) this.overrideMaterial = source.overrideMaterial.clone();
+function animate() {
 
-		this.autoUpdate = source.autoUpdate;
-		this.matrixAutoUpdate = source.matrixAutoUpdate;
+	// group.rotation.x = Date.now() / 4000;
+	group.rotation.y = - Date.now() / 4000;
 
-		return this;
+	renderer.render( scene, camera );
 
-	}
+	if ( self.requestAnimationFrame ) {
 
-	toJSON( meta ) {
+		self.requestAnimationFrame( animate );
 
-		const data = super.toJSON( meta );
+	} else {
 
-		if ( this.fog !== null ) data.object.fog = this.fog.toJSON();
-
-		return data;
+		// Firefox
 
 	}
 
 }
 
-Scene.prototype.isScene = true;
+// PRNG
 
-export { Scene };
+let seed = 1;
+
+function random() {
+
+	const x = Math.sin( seed ++ ) * 10000;
+
+	return x - Math.floor( x );
+
+}
+
+export default init;

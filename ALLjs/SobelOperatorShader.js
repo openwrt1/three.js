@@ -1,24 +1,24 @@
-import {
-	Vector2
-} from 'three';
+( function () {
 
-/**
+	/**
  * Sobel Edge Detection (see https://youtu.be/uihBwtPIBxM)
  *
  * As mentioned in the video the Sobel operator expects a grayscale image as input.
  *
  */
 
-const SobelOperatorShader = {
-
-	uniforms: {
-
-		'tDiffuse': { value: null },
-		'resolution': { value: new Vector2() }
-
-	},
-
-	vertexShader: /* glsl */`
+	const SobelOperatorShader = {
+		uniforms: {
+			'tDiffuse': {
+				value: null
+			},
+			'resolution': {
+				value: new THREE.Vector2()
+			}
+		},
+		vertexShader:
+  /* glsl */
+  `
 
 		varying vec2 vUv;
 
@@ -29,8 +29,9 @@ const SobelOperatorShader = {
 			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
 
 		}`,
-
-	fragmentShader: /* glsl */`
+		fragmentShader:
+  /* glsl */
+  `
 
 		uniform sampler2D tDiffuse;
 		uniform vec2 resolution;
@@ -84,7 +85,8 @@ const SobelOperatorShader = {
 			gl_FragColor = vec4( vec3( G ), 1 );
 
 		}`
+	};
 
-};
+	THREE.SobelOperatorShader = SobelOperatorShader;
 
-export { SobelOperatorShader };
+} )();

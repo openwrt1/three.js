@@ -1,993 +1,750 @@
-// The Tern server object
+// CodeMirror, copyright (c) by Marijn Haverbeke and others
+// Distributed under an MIT license: https://codemirror.net/LICENSE
 
-// A server is a stateful object that manages the analysis for a
-// project, and defines an interface for querying the code in the
-// project.
+// Glue code between CodeMirror and Tern.
+//
+// Create a CodeMirror.TernServer to wrap an actual Tern server,
+// register open documents (CodeMirror.Doc instances) with it, and
+// call its methods to activate the assisting functions that Tern
+// provides.
+//
+// Options supported (all optional):
+// * defs: An array of JSON definition data structures.
+// * plugins: An object mapping plugin names to configuration
+//   options.
+// * getFile: A function(name, c) that can be used to access files in
+//   the project that haven't been loaded yet. Simply do c(null) to
+//   indicate that a file is not available.
+// * fileFilter: A function(value, docName, doc) that will be applied
+//   to documents before passing them on to Tern.
+// * switchToDoc: A function(name, doc) that should, when providing a
+//   multi-file view, switch the view or focus to the named file.
+// * showError: A function(editor, message) that can be used to
+//   override the way errors are displayed.
+// * completionTip: Customize the content in tooltips for completions.
+//   Is passed a single argument—the completion's data as returned by
+//   Tern—and may return a string, DOM node, or null to indicate that
+//   no tip should be shown. By default the docstring is shown.
+// * typeTip: Like completionTip, but for the tooltips shown for type
+//   queries.
+// * responseFilter: A function(doc, query, request, error, data) that
+//   will be applied to the Tern responses before treating them
+//
+//
+// It is possible to run the Tern server in a web worker by specifying
+// these additional options:
+// * useWorker: Set to true to enable web worker mode. You'll probably
+//   want to feature detect the actual value you use here, for example
+//   !!window.Worker.
+// * workerScript: The main script of the worker. Point this to
+//   wherever you are hosting worker.js from this directory.
+// * workerDeps: An array of paths pointing (relative to workerScript)
+//   to the Acorn and Tern libraries and any Tern plugins you want to
+//   load. Or, if you minified those into a single script and included
+//   them in the workerScript, simply leave this undefined.
 
-(function(root, mod) {
+(function(mod) {
   if (typeof exports == "object" && typeof module == "object") // CommonJS
-    return mod(exports, require("./infer"), require("./signal"),
-               require("acorn"), require("acorn/dist/walk"));
-  if (typeof define == "function" && define.amd) // AMD
-    return define(["exports", "./infer", "./signal", "acorn/dist/acorn", "acorn/dist/walk"], mod);
-  mod(root.tern || (root.tern = {}), tern, tern.signal, acorn, acorn.walk); // Plain browser env
-})(this, function(exports, infer, signal, acorn, walk) {
+    mod(require("../../lib/codemirror"));
+  else if (typeof define == "function" && define.amd) // AMD
+    define(["../../lib/codemirror"], mod);
+  else // Plain browser env
+    mod(CodeMirror);
+})(function(CodeMirror) {
   "use strict";
+  // declare global: tern
 
-  var plugins = Object.create(null);
-  exports.registerPlugin = function(name, init) { plugins[name] = init; };
-
-  var defaultOptions = exports.defaultOptions = {
-    debug: false,
-    async: false,
-    getFile: function(_f, c) { if (this.async) c(null, null); },
-    defs: [],
-    plugins: {},
-    fetchTimeout: 1000,
-    dependencyBudget: 20000,
-    reuseInstances: true,
-    stripCRs: false
-  };
-
-  var queryTypes = {
-    completions: {
-      takesFile: true,
-      run: findCompletions
-    },
-    properties: {
-      run: findProperties
-    },
-    type: {
-      takesFile: true,
-      run: findTypeAt
-    },
-    documentation: {
-      takesFile: true,
-      run: findDocs
-    },
-    definition: {
-      takesFile: true,
-      run: findDef
-    },
-    refs: {
-      takesFile: true,
-      fullFile: true,
-      run: findRefs
-    },
-    rename: {
-      takesFile: true,
-      fullFile: true,
-      run: buildRename
-    },
-    files: {
-      run: listFiles
-    }
-  };
-
-  exports.defineQueryType = function(name, desc) { queryTypes[name] = desc; };
-
-  function File(name, parent) {
-    this.name = name;
-    this.parent = parent;
-    this.scope = this.text = this.ast = this.lineOffsets = null;
-  }
-  File.prototype.asLineChar = function(pos) { return asLineChar(this, pos); };
-
-  function updateText(file, text, srv) {
-    file.text = srv.options.stripCRs ? text.replace(/\r\n/g, "\n") : text;
-    infer.withContext(srv.cx, function() {
-      file.ast = infer.parse(file.text, srv.passes, {directSourceFile: file, allowReturnOutsideFunction: true});
-    });
-    file.lineOffsets = null;
-  }
-
-  var Server = exports.Server = function(options) {
-    this.cx = null;
+  CodeMirror.TernServer = function(options) {
+    var self = this;
     this.options = options || {};
-    for (var o in defaultOptions) if (!options.hasOwnProperty(o))
-      options[o] = defaultOptions[o];
-
-    this.handlers = Object.create(null);
-    this.files = [];
-    this.fileMap = Object.create(null);
-    this.needsPurge = [];
-    this.budgets = Object.create(null);
-    this.uses = 0;
-    this.pending = 0;
-    this.asyncError = null;
-    this.passes = Object.create(null);
-
-    this.defs = options.defs.slice(0);
-    for (var plugin in options.plugins) if (options.plugins.hasOwnProperty(plugin) && plugin in plugins) {
-      var init = plugins[plugin](this, options.plugins[plugin]);
-      if (init && init.defs) {
-        if (init.loadFirst) this.defs.unshift(init.defs);
-        else this.defs.push(init.defs);
-      }
-      if (init && init.passes) for (var type in init.passes) if (init.passes.hasOwnProperty(type))
-        (this.passes[type] || (this.passes[type] = [])).push(init.passes[type]);
+    var plugins = this.options.plugins || (this.options.plugins = {});
+    if (!plugins.doc_comment) plugins.doc_comment = true;
+    this.docs = Object.create(null);
+    if (this.options.useWorker) {
+      this.server = new WorkerServer(this);
+    } else {
+      this.server = new tern.Server({
+        getFile: function(name, c) { return getFile(self, name, c); },
+        async: true,
+        defs: this.options.defs || [],
+        plugins: plugins
+      });
     }
+    this.trackChange = function(doc, change) { trackChange(self, doc, change); };
 
-    this.reset();
+    this.cachedArgHints = null;
+    this.activeArgHints = null;
+    this.jumpStack = [];
+
+    this.getHint = function(cm, c) { return hint(self, cm, c); };
+    this.getHint.async = true;
   };
-  Server.prototype = signal.mixin({
-    addFile: function(name, /*optional*/ text, parent) {
-      // Don't crash when sloppy plugins pass non-existent parent ids
-      if (parent && !(parent in this.fileMap)) parent = null;
-      ensureFile(this, name, parent, text);
-    },
-    delFile: function(name) {
-      var file = this.findFile(name);
-      if (file) {
-        this.needsPurge.push(file.name);
-        this.files.splice(this.files.indexOf(file), 1);
-        delete this.fileMap[name];
-      }
-    },
-    reset: function() {
-      this.signal("reset");
-      this.cx = new infer.Context(this.defs, this);
-      this.uses = 0;
-      this.budgets = Object.create(null);
-      for (var i = 0; i < this.files.length; ++i) {
-        var file = this.files[i];
-        file.scope = null;
-      }
+
+  CodeMirror.TernServer.prototype = {
+    addDoc: function(name, doc) {
+      var data = {doc: doc, name: name, changed: null};
+      this.server.addFile(name, docValue(this, data));
+      CodeMirror.on(doc, "change", this.trackChange);
+      return this.docs[name] = data;
     },
 
-    request: function(doc, c) {
-      var inv = invalidDoc(doc);
-      if (inv) return c(inv);
+    delDoc: function(id) {
+      var found = resolveDoc(this, id);
+      if (!found) return;
+      CodeMirror.off(found.doc, "change", this.trackChange);
+      delete this.docs[found.name];
+      this.server.delFile(found.name);
+    },
 
+    hideDoc: function(id) {
+      closeArgHints(this);
+      var found = resolveDoc(this, id);
+      if (found && found.changed) sendDoc(this, found);
+    },
+
+    complete: function(cm) {
+      cm.showHint({hint: this.getHint});
+    },
+
+    showType: function(cm, pos, c) { showContextInfo(this, cm, pos, "type", c); },
+
+    showDocs: function(cm, pos, c) { showContextInfo(this, cm, pos, "documentation", c); },
+
+    updateArgHints: function(cm) { updateArgHints(this, cm); },
+
+    jumpToDef: function(cm) { jumpToDef(this, cm); },
+
+    jumpBack: function(cm) { jumpBack(this, cm); },
+
+    rename: function(cm) { rename(this, cm); },
+
+    selectName: function(cm) { selectName(this, cm); },
+
+    request: function (cm, query, c, pos) {
       var self = this;
-      doRequest(this, doc, function(err, data) {
-        c(err, data);
-        if (self.uses > 40) {
-          self.reset();
-          analyzeAll(self, null, function(){});
-        }
+      var doc = findDoc(this, cm.getDoc());
+      var request = buildRequest(this, doc, query, pos);
+      var extraOptions = request.query && this.options.queryOptions && this.options.queryOptions[request.query.type]
+      if (extraOptions) for (var prop in extraOptions) request.query[prop] = extraOptions[prop];
+
+      this.server.request(request, function (error, data) {
+        if (!error && self.options.responseFilter)
+          data = self.options.responseFilter(doc, query, request, error, data);
+        c(error, data);
       });
     },
 
-    findFile: function(name) {
-      return this.fileMap[name];
-    },
-
-    flush: function(c) {
-      var cx = this.cx;
-      analyzeAll(this, null, function(err) {
-        if (err) return c(err);
-        infer.withContext(cx, c);
-      });
-    },
-
-    startAsyncAction: function() {
-      ++this.pending;
-    },
-    finishAsyncAction: function(err) {
-      if (err) this.asyncError = err;
-      if (--this.pending === 0) this.signal("everythingFetched");
-    }
-  });
-
-  function doRequest(srv, doc, c) {
-    if (doc.query && !queryTypes.hasOwnProperty(doc.query.type))
-      return c("No query type '" + doc.query.type + "' defined");
-
-    var query = doc.query;
-    // Respond as soon as possible when this just uploads files
-    if (!query) c(null, {});
-
-    var files = doc.files || [];
-    if (files.length) ++srv.uses;
-    for (var i = 0; i < files.length; ++i) {
-      var file = files[i];
-      if (file.type == "delete")
-        srv.delFile(file.name);
-      else
-        ensureFile(srv, file.name, null, file.type == "full" ? file.text : null);
-    }
-
-    var timeBudget = typeof doc.timeout == "number" ? [doc.timeout] : null;
-    if (!query) {
-      analyzeAll(srv, timeBudget, function(){});
-      return;
-    }
-
-    var queryType = queryTypes[query.type];
-    if (queryType.takesFile) {
-      if (typeof query.file != "string") return c(".query.file must be a string");
-      if (!/^#/.test(query.file)) ensureFile(srv, query.file, null);
-    }
-
-    analyzeAll(srv, timeBudget, function(err) {
-      if (err) return c(err);
-      var file = queryType.takesFile && resolveFile(srv, files, query.file);
-      if (queryType.fullFile && file.type == "part")
-        return c("Can't run a " + query.type + " query on a file fragment");
-
-      function run() {
-        var result;
-        try {
-          result = queryType.run(srv, query, file);
-        } catch (e) {
-          if (srv.options.debug && e.name != "TernError") console.error(e.stack);
-          return c(e);
-        }
-        c(null, result);
+    destroy: function () {
+      closeArgHints(this)
+      if (this.worker) {
+        this.worker.terminate();
+        this.worker = null;
       }
-      infer.withContext(srv.cx, timeBudget ? function() { infer.withTimeout(timeBudget[0], run); } : run);
-    });
-  }
-
-  function analyzeFile(srv, file) {
-    infer.withContext(srv.cx, function() {
-      file.scope = srv.cx.topScope;
-      srv.signal("beforeLoad", file);
-      infer.analyze(file.ast, file.name, file.scope, srv.passes);
-      srv.signal("afterLoad", file);
-    });
-    return file;
-  }
-
-  function ensureFile(srv, name, parent, text) {
-    var known = srv.findFile(name);
-    if (known) {
-      if (text != null) {
-        if (known.scope) {
-          srv.needsPurge.push(name);
-          known.scope = null;
-        }
-        updateText(known, text, srv);
-      }
-      if (parentDepth(srv, known.parent) > parentDepth(srv, parent)) {
-        known.parent = parent;
-        if (known.excluded) known.excluded = null;
-      }
-      return;
-    }
-
-    var file = new File(name, parent);
-    srv.files.push(file);
-    srv.fileMap[name] = file;
-    if (text != null) {
-      updateText(file, text, srv);
-    } else if (srv.options.async) {
-      srv.startAsyncAction();
-      srv.options.getFile(name, function(err, text) {
-        updateText(file, text || "", srv);
-        srv.finishAsyncAction(err);
-      });
-    } else {
-      updateText(file, srv.options.getFile(name) || "", srv);
-    }
-  }
-
-  function fetchAll(srv, c) {
-    var done = true, returned = false;
-    srv.files.forEach(function(file) {
-      if (file.text != null) return;
-      if (srv.options.async) {
-        done = false;
-        srv.options.getFile(file.name, function(err, text) {
-          if (err && !returned) { returned = true; return c(err); }
-          updateText(file, text || "", srv);
-          fetchAll(srv, c);
-        });
-      } else {
-        try {
-          updateText(file, srv.options.getFile(file.name) || "", srv);
-        } catch (e) { return c(e); }
-      }
-    });
-    if (done) c();
-  }
-
-  function waitOnFetch(srv, timeBudget, c) {
-    var done = function() {
-      srv.off("everythingFetched", done);
-      clearTimeout(timeout);
-      analyzeAll(srv, timeBudget, c);
-    };
-    srv.on("everythingFetched", done);
-    var timeout = setTimeout(done, srv.options.fetchTimeout);
-  }
-
-  function analyzeAll(srv, timeBudget, c) {
-    if (srv.pending) return waitOnFetch(srv, timeBudget, c);
-
-    var e = srv.fetchError;
-    if (e) { srv.fetchError = null; return c(e); }
-
-    if (srv.needsPurge.length > 0) infer.withContext(srv.cx, function() {
-      infer.purge(srv.needsPurge);
-      srv.needsPurge.length = 0;
-    });
-
-    var done = true;
-    // The second inner loop might add new files. The outer loop keeps
-    // repeating both inner loops until all files have been looked at.
-    for (var i = 0; i < srv.files.length;) {
-      var toAnalyze = [];
-      for (; i < srv.files.length; ++i) {
-        var file = srv.files[i];
-        if (file.text == null) done = false;
-        else if (file.scope == null && !file.excluded) toAnalyze.push(file);
-      }
-      toAnalyze.sort(function(a, b) {
-        return parentDepth(srv, a.parent) - parentDepth(srv, b.parent);
-      });
-      for (var j = 0; j < toAnalyze.length; j++) {
-        var file = toAnalyze[j];
-        if (file.parent && !chargeOnBudget(srv, file)) {
-          file.excluded = true;
-        } else if (timeBudget) {
-          var startTime = +new Date;
-          infer.withTimeout(timeBudget[0], function() { analyzeFile(srv, file); });
-          timeBudget[0] -= +new Date - startTime;
-        } else {
-          analyzeFile(srv, file);
-        }
-      }
-    }
-    if (done) c();
-    else waitOnFetch(srv, timeBudget, c);
-  }
-
-  function firstLine(str) {
-    var end = str.indexOf("\n");
-    if (end < 0) return str;
-    return str.slice(0, end);
-  }
-
-  function findMatchingPosition(line, file, near) {
-    var pos = Math.max(0, near - 500), closest = null;
-    if (!/^\s*$/.test(line)) for (;;) {
-      var found = file.indexOf(line, pos);
-      if (found < 0 || found > near + 500) break;
-      if (closest == null || Math.abs(closest - near) > Math.abs(found - near))
-        closest = found;
-      pos = found + line.length;
-    }
-    return closest;
-  }
-
-  function scopeDepth(s) {
-    for (var i = 0; s; ++i, s = s.prev) {}
-    return i;
-  }
-
-  function ternError(msg) {
-    var err = new Error(msg);
-    err.name = "TernError";
-    return err;
-  }
-
-  function resolveFile(srv, localFiles, name) {
-    var isRef = name.match(/^#(\d+)$/);
-    if (!isRef) return srv.findFile(name);
-
-    var file = localFiles[isRef[1]];
-    if (!file || file.type == "delete") throw ternError("Reference to unknown file " + name);
-    if (file.type == "full") return srv.findFile(file.name);
-
-    // This is a partial file
-
-    var realFile = file.backing = srv.findFile(file.name);
-    var offset;
-    file.offset = offset = resolvePos(realFile, file.offsetLines == null ? file.offset : {line: file.offsetLines, ch: 0}, true);
-    var line = firstLine(file.text);
-    var foundPos = findMatchingPosition(line, realFile.text, offset);
-    var pos = foundPos == null ? Math.max(0, realFile.text.lastIndexOf("\n", offset)) : foundPos;
-    var inObject, atFunction;
-
-    infer.withContext(srv.cx, function() {
-      infer.purge(file.name, pos, pos + file.text.length);
-
-      var text = file.text, m;
-      if (m = text.match(/(?:"([^"]*)"|([\w$]+))\s*:\s*function\b/)) {
-        var objNode = walk.findNodeAround(file.backing.ast, pos, "ObjectExpression");
-        if (objNode && objNode.node.objType)
-          inObject = {type: objNode.node.objType, prop: m[2] || m[1]};
-      }
-      if (foundPos && (m = line.match(/^(.*?)\bfunction\b/))) {
-        var cut = m[1].length, white = "";
-        for (var i = 0; i < cut; ++i) white += " ";
-        text = white + text.slice(cut);
-        atFunction = true;
-      }
-
-      var scopeStart = infer.scopeAt(realFile.ast, pos, realFile.scope);
-      var scopeEnd = infer.scopeAt(realFile.ast, pos + text.length, realFile.scope);
-      var scope = file.scope = scopeDepth(scopeStart) < scopeDepth(scopeEnd) ? scopeEnd : scopeStart;
-      file.ast = infer.parse(text, srv.passes, {directSourceFile: file, allowReturnOutsideFunction: true});
-      infer.analyze(file.ast, file.name, scope, srv.passes);
-
-      // This is a kludge to tie together the function types (if any)
-      // outside and inside of the fragment, so that arguments and
-      // return values have some information known about them.
-      tieTogether: if (inObject || atFunction) {
-        var newInner = infer.scopeAt(file.ast, line.length, scopeStart);
-        if (!newInner.fnType) break tieTogether;
-        if (inObject) {
-          var prop = inObject.type.getProp(inObject.prop);
-          prop.addType(newInner.fnType);
-        } else if (atFunction) {
-          var inner = infer.scopeAt(realFile.ast, pos + line.length, realFile.scope);
-          if (inner == scopeStart || !inner.fnType) break tieTogether;
-          var fOld = inner.fnType, fNew = newInner.fnType;
-          if (!fNew || (fNew.name != fOld.name && fOld.name)) break tieTogether;
-          for (var i = 0, e = Math.min(fOld.args.length, fNew.args.length); i < e; ++i)
-            fOld.args[i].propagate(fNew.args[i]);
-          fOld.self.propagate(fNew.self);
-          fNew.retval.propagate(fOld.retval);
-        }
-      }
-    });
-    return file;
-  }
-
-  // Budget management
-
-  function astSize(node) {
-    var size = 0;
-    walk.simple(node, {Expression: function() { ++size; }});
-    return size;
-  }
-
-  function parentDepth(srv, parent) {
-    var depth = 0;
-    while (parent) {
-      parent = srv.findFile(parent).parent;
-      ++depth;
-    }
-    return depth;
-  }
-
-  function budgetName(srv, file) {
-    for (;;) {
-      var parent = srv.findFile(file.parent);
-      if (!parent.parent) break;
-      file = parent;
-    }
-    return file.name;
-  }
-
-  function chargeOnBudget(srv, file) {
-    var bName = budgetName(srv, file);
-    var size = astSize(file.ast);
-    var known = srv.budgets[bName];
-    if (known == null)
-      known = srv.budgets[bName] = srv.options.dependencyBudget;
-    if (known < size) return false;
-    srv.budgets[bName] = known - size;
-    return true;
-  }
-
-  // Query helpers
-
-  function isPosition(val) {
-    return typeof val == "number" || typeof val == "object" &&
-      typeof val.line == "number" && typeof val.ch == "number";
-  }
-
-  // Baseline query document validation
-  function invalidDoc(doc) {
-    if (doc.query) {
-      if (typeof doc.query.type != "string") return ".query.type must be a string";
-      if (doc.query.start && !isPosition(doc.query.start)) return ".query.start must be a position";
-      if (doc.query.end && !isPosition(doc.query.end)) return ".query.end must be a position";
-    }
-    if (doc.files) {
-      if (!Array.isArray(doc.files)) return "Files property must be an array";
-      for (var i = 0; i < doc.files.length; ++i) {
-        var file = doc.files[i];
-        if (typeof file != "object") return ".files[n] must be objects";
-        else if (typeof file.name != "string") return ".files[n].name must be a string";
-        else if (file.type == "delete") continue;
-        else if (typeof file.text != "string") return ".files[n].text must be a string";
-        else if (file.type == "part") {
-          if (!isPosition(file.offset) && typeof file.offsetLines != "number")
-            return ".files[n].offset must be a position";
-        } else if (file.type != "full") return ".files[n].type must be \"full\" or \"part\"";
-      }
-    }
-  }
-
-  var offsetSkipLines = 25;
-
-  function findLineStart(file, line) {
-    var text = file.text, offsets = file.lineOffsets || (file.lineOffsets = [0]);
-    var pos = 0, curLine = 0;
-    var storePos = Math.min(Math.floor(line / offsetSkipLines), offsets.length - 1);
-    var pos = offsets[storePos], curLine = storePos * offsetSkipLines;
-
-    while (curLine < line) {
-      ++curLine;
-      pos = text.indexOf("\n", pos) + 1;
-      if (pos === 0) return null;
-      if (curLine % offsetSkipLines === 0) offsets.push(pos);
-    }
-    return pos;
-  }
-
-  var resolvePos = exports.resolvePos = function(file, pos, tolerant) {
-    if (typeof pos != "number") {
-      var lineStart = findLineStart(file, pos.line);
-      if (lineStart == null) {
-        if (tolerant) pos = file.text.length;
-        else throw ternError("File doesn't contain a line " + pos.line);
-      } else {
-        pos = lineStart + pos.ch;
-      }
-    }
-    if (pos > file.text.length) {
-      if (tolerant) pos = file.text.length;
-      else throw ternError("Position " + pos + " is outside of file.");
-    }
-    return pos;
-  };
-
-  function asLineChar(file, pos) {
-    if (!file) return {line: 0, ch: 0};
-    var offsets = file.lineOffsets || (file.lineOffsets = [0]);
-    var text = file.text, line, lineStart;
-    for (var i = offsets.length - 1; i >= 0; --i) if (offsets[i] <= pos) {
-      line = i * offsetSkipLines;
-      lineStart = offsets[i];
-    }
-    for (;;) {
-      var eol = text.indexOf("\n", lineStart);
-      if (eol >= pos || eol < 0) break;
-      lineStart = eol + 1;
-      ++line;
-    }
-    return {line: line, ch: pos - lineStart};
-  }
-
-  var outputPos = exports.outputPos = function(query, file, pos) {
-    if (query.lineCharPositions) {
-      var out = asLineChar(file, pos);
-      if (file.type == "part")
-        out.line += file.offsetLines != null ? file.offsetLines : asLineChar(file.backing, file.offset).line;
-      return out;
-    } else {
-      return pos + (file.type == "part" ? file.offset : 0);
     }
   };
 
-  // Delete empty fields from result objects
-  function clean(obj) {
-    for (var prop in obj) if (obj[prop] == null) delete obj[prop];
-    return obj;
-  }
-  function maybeSet(obj, prop, val) {
-    if (val != null) obj[prop] = val;
-  }
+  var Pos = CodeMirror.Pos;
+  var cls = "CodeMirror-Tern-";
+  var bigDoc = 250;
 
-  // Built-in query types
-
-  function compareCompletions(a, b) {
-    if (typeof a != "string") { a = a.name; b = b.name; }
-    var aUp = /^[A-Z]/.test(a), bUp = /^[A-Z]/.test(b);
-    if (aUp == bUp) return a < b ? -1 : a == b ? 0 : 1;
-    else return aUp ? 1 : -1;
-  }
-
-  function isStringAround(node, start, end) {
-    return node.type == "Literal" && typeof node.value == "string" &&
-      node.start == start - 1 && node.end <= end + 1;
-  }
-
-  function pointInProp(objNode, point) {
-    for (var i = 0; i < objNode.properties.length; i++) {
-      var curProp = objNode.properties[i];
-      if (curProp.key.start <= point && curProp.key.end >= point)
-        return curProp;
-    }
-  }
-
-  var jsKeywords = ("break do instanceof typeof case else new var " +
-    "catch finally return void continue for switch while debugger " +
-    "function this with default if throw delete in try").split(" ");
-
-  function findCompletions(srv, query, file) {
-    if (query.end == null) throw ternError("missing .query.end field");
-    if (srv.passes.completion) for (var i = 0; i < srv.passes.completion.length; i++) {
-      var result = srv.passes.completion[i](file, query);
-      if (result) return result;
-    }
-
-    var wordStart = resolvePos(file, query.end), wordEnd = wordStart, text = file.text;
-    while (wordStart && acorn.isIdentifierChar(text.charCodeAt(wordStart - 1))) --wordStart;
-    if (query.expandWordForward !== false)
-      while (wordEnd < text.length && acorn.isIdentifierChar(text.charCodeAt(wordEnd))) ++wordEnd;
-    var word = text.slice(wordStart, wordEnd), completions = [], ignoreObj;
-    if (query.caseInsensitive) word = word.toLowerCase();
-    var wrapAsObjs = query.types || query.depths || query.docs || query.urls || query.origins;
-
-    function gather(prop, obj, depth, addInfo) {
-      // 'hasOwnProperty' and such are usually just noise, leave them
-      // out when no prefix is provided.
-      if ((objLit || query.omitObjectPrototype !== false) && obj == srv.cx.protos.Object && !word) return;
-      if (query.filter !== false && word &&
-          (query.caseInsensitive ? prop.toLowerCase() : prop).indexOf(word) !== 0) return;
-      if (ignoreObj && ignoreObj.props[prop]) return;
-      for (var i = 0; i < completions.length; ++i) {
-        var c = completions[i];
-        if ((wrapAsObjs ? c.name : c) == prop) return;
-      }
-      var rec = wrapAsObjs ? {name: prop} : prop;
-      completions.push(rec);
-
-      if (obj && (query.types || query.docs || query.urls || query.origins)) {
-        var val = obj.props[prop];
-        infer.resetGuessing();
-        var type = val.getType();
-        rec.guess = infer.didGuess();
-        if (query.types)
-          rec.type = infer.toString(val);
-        if (query.docs)
-          maybeSet(rec, "doc", val.doc || type && type.doc);
-        if (query.urls)
-          maybeSet(rec, "url", val.url || type && type.url);
-        if (query.origins)
-          maybeSet(rec, "origin", val.origin || type && type.origin);
-      }
-      if (query.depths) rec.depth = depth;
-      if (wrapAsObjs && addInfo) addInfo(rec);
-    }
-
-    var hookname, prop, objType, isKey;
-
-    var exprAt = infer.findExpressionAround(file.ast, null, wordStart, file.scope);
-    var memberExpr, objLit;
-    // Decide whether this is an object property, either in a member
-    // expression or an object literal.
-    if (exprAt) {
-      if (exprAt.node.type == "MemberExpression" && exprAt.node.object.end < wordStart) {
-        memberExpr = exprAt;
-      } else if (isStringAround(exprAt.node, wordStart, wordEnd)) {
-        var parent = infer.parentNode(exprAt.node, file.ast);
-        if (parent.type == "MemberExpression" && parent.property == exprAt.node)
-          memberExpr = {node: parent, state: exprAt.state};
-      } else if (exprAt.node.type == "ObjectExpression") {
-        var objProp = pointInProp(exprAt.node, wordEnd);
-        if (objProp) {
-          objLit = exprAt;
-          prop = isKey = objProp.key.name;
-        } else if (!word && !/:\s*$/.test(file.text.slice(0, wordStart))) {
-          objLit = exprAt;
-          prop = isKey = true;
-        }
-      }
-    }
-
-    if (objLit) {
-      // Since we can't use the type of the literal itself to complete
-      // its properties (it doesn't contain the information we need),
-      // we have to try asking the surrounding expression for type info.
-      objType = infer.typeFromContext(file.ast, objLit);
-      ignoreObj = objLit.node.objType;
-    } else if (memberExpr) {
-      prop = memberExpr.node.property;
-      prop = prop.type == "Literal" ? prop.value.slice(1) : prop.name;
-      memberExpr.node = memberExpr.node.object;
-      objType = infer.expressionType(memberExpr);
-    } else if (text.charAt(wordStart - 1) == ".") {
-      var pathStart = wordStart - 1;
-      while (pathStart && (text.charAt(pathStart - 1) == "." || acorn.isIdentifierChar(text.charCodeAt(pathStart - 1)))) pathStart--;
-      var path = text.slice(pathStart, wordStart - 1);
-      if (path) {
-        objType = infer.def.parsePath(path, file.scope).getObjType();
-        prop = word;
-      }
-    }
-
-    if (prop != null) {
-      srv.cx.completingProperty = prop;
-
-      if (objType) infer.forAllPropertiesOf(objType, gather);
-
-      if (!completions.length && query.guess !== false && objType && objType.guessProperties)
-        objType.guessProperties(function(p, o, d) {if (p != prop && p != "✖") gather(p, o, d);});
-      if (!completions.length && word.length >= 2 && query.guess !== false)
-        for (var prop in srv.cx.props) gather(prop, srv.cx.props[prop][0], 0);
-      hookname = "memberCompletion";
-    } else {
-      infer.forAllLocalsAt(file.ast, wordStart, file.scope, gather);
-      if (query.includeKeywords) jsKeywords.forEach(function(kw) {
-        gather(kw, null, 0, function(rec) { rec.isKeyword = true; });
-      });
-      hookname = "variableCompletion";
-    }
-    if (srv.passes[hookname])
-      srv.passes[hookname].forEach(function(hook) {hook(file, wordStart, wordEnd, gather);});
-
-    if (query.sort !== false) completions.sort(compareCompletions);
-    srv.cx.completingProperty = null;
-
-    return {start: outputPos(query, file, wordStart),
-            end: outputPos(query, file, wordEnd),
-            isProperty: !!prop,
-            isObjectKey: !!isKey,
-            completions: completions};
-  }
-
-  function findProperties(srv, query) {
-    var prefix = query.prefix, found = [];
-    for (var prop in srv.cx.props)
-      if (prop != "<i>" && (!prefix || prop.indexOf(prefix) === 0)) found.push(prop);
-    if (query.sort !== false) found.sort(compareCompletions);
-    return {completions: found};
-  }
-
-  var findExpr = exports.findQueryExpr = function(file, query, wide) {
-    if (query.end == null) throw ternError("missing .query.end field");
-
-    if (query.variable) {
-      var scope = infer.scopeAt(file.ast, resolvePos(file, query.end), file.scope);
-      return {node: {type: "Identifier", name: query.variable, start: query.end, end: query.end + 1},
-              state: scope};
-    } else {
-      var start = query.start && resolvePos(file, query.start), end = resolvePos(file, query.end);
-      var expr = infer.findExpressionAt(file.ast, start, end, file.scope);
-      if (expr) return expr;
-      expr = infer.findExpressionAround(file.ast, start, end, file.scope);
-      if (expr && (expr.node.type == "ObjectExpression" || wide ||
-                   (start == null ? end : start) - expr.node.start < 20 || expr.node.end - end < 20))
-        return expr;
-      return null;
-    }
-  };
-
-  function findExprOrThrow(file, query, wide) {
-    var expr = findExpr(file, query, wide);
-    if (expr) return expr;
-    throw ternError("No expression at the given position.");
-  }
-
-  function ensureObj(tp) {
-    if (!tp || !(tp = tp.getType()) || !(tp instanceof infer.Obj)) return null;
-    return tp;
-  }
-
-  function findExprType(srv, query, file, expr) {
-    var type;
-    if (expr) {
-      infer.resetGuessing();
-      type = infer.expressionType(expr);
-    }
-    if (srv.passes["typeAt"]) {
-      var pos = resolvePos(file, query.end);
-      srv.passes["typeAt"].forEach(function(hook) {
-        type = hook(file, pos, expr, type);
-      });
-    }
-    if (!type) throw ternError("No type found at the given position.");
-
-    var objProp;
-    if (expr.node.type == "ObjectExpression" && query.end != null &&
-        (objProp = pointInProp(expr.node, resolvePos(file, query.end)))) {
-      var name = objProp.key.name;
-      var fromCx = ensureObj(infer.typeFromContext(file.ast, expr));
-      if (fromCx && fromCx.hasProp(name)) {
-        type = fromCx.hasProp(name);
-      } else {
-        var fromLocal = ensureObj(type);
-        if (fromLocal && fromLocal.hasProp(name))
-          type = fromLocal.hasProp(name);
-      }
-    }
-    return type;
-  };
-
-  function findTypeAt(srv, query, file) {
-    var expr = findExpr(file, query), exprName;
-    var type = findExprType(srv, query, file, expr), exprType = type;
-    if (query.preferFunction)
-      type = type.getFunctionType() || type.getType();
+  function getFile(ts, name, c) {
+    var buf = ts.docs[name];
+    if (buf)
+      c(docValue(ts, buf));
+    else if (ts.options.getFile)
+      ts.options.getFile(name, c);
     else
-      type = type.getType();
-
-    if (expr) {
-      if (expr.node.type == "Identifier")
-        exprName = expr.node.name;
-      else if (expr.node.type == "MemberExpression" && !expr.node.computed)
-        exprName = expr.node.property.name;
-    }
-
-    if (query.depth != null && typeof query.depth != "number")
-      throw ternError(".query.depth must be a number");
-
-    var result = {guess: infer.didGuess(),
-                  type: infer.toString(exprType, query.depth),
-                  name: type && type.name,
-                  exprName: exprName};
-    if (type) storeTypeDocs(type, result);
-    if (!result.doc && exprType.doc) result.doc = exprType.doc;
-
-    return clean(result);
+      c(null);
   }
 
-  function findDocs(srv, query, file) {
-    var expr = findExpr(file, query);
-    var type = findExprType(srv, query, file, expr);
-    var result = {url: type.url, doc: type.doc, type: infer.toString(type)};
-    var inner = type.getType();
-    if (inner) storeTypeDocs(inner, result);
-    return clean(result);
+  function findDoc(ts, doc, name) {
+    for (var n in ts.docs) {
+      var cur = ts.docs[n];
+      if (cur.doc == doc) return cur;
+    }
+    if (!name) for (var i = 0;; ++i) {
+      n = "[doc" + (i || "") + "]";
+      if (!ts.docs[n]) { name = n; break; }
+    }
+    return ts.addDoc(name, doc);
   }
 
-  function storeTypeDocs(type, out) {
-    if (!out.url) out.url = type.url;
-    if (!out.doc) out.doc = type.doc;
-    if (!out.origin) out.origin = type.origin;
-    var ctor, boring = infer.cx().protos;
-    if (!out.url && !out.doc && type.proto && (ctor = type.proto.hasCtor) &&
-        type.proto != boring.Object && type.proto != boring.Function && type.proto != boring.Array) {
-      out.url = ctor.url;
-      out.doc = ctor.doc;
-    }
+  function resolveDoc(ts, id) {
+    if (typeof id == "string") return ts.docs[id];
+    if (id instanceof CodeMirror) id = id.getDoc();
+    if (id instanceof CodeMirror.Doc) return findDoc(ts, id);
   }
 
-  var getSpan = exports.getSpan = function(obj) {
-    if (!obj.origin) return;
-    if (obj.originNode) {
-      var node = obj.originNode;
-      if (/^Function/.test(node.type) && node.id) node = node.id;
-      return {origin: obj.origin, node: node};
-    }
-    if (obj.span) return {origin: obj.origin, span: obj.span};
-  };
+  function trackChange(ts, doc, change) {
+    var data = findDoc(ts, doc);
 
-  var storeSpan = exports.storeSpan = function(srv, query, span, target) {
-    target.origin = span.origin;
-    if (span.span) {
-      var m = /^(\d+)\[(\d+):(\d+)\]-(\d+)\[(\d+):(\d+)\]$/.exec(span.span);
-      target.start = query.lineCharPositions ? {line: Number(m[2]), ch: Number(m[3])} : Number(m[1]);
-      target.end = query.lineCharPositions ? {line: Number(m[5]), ch: Number(m[6])} : Number(m[4]);
-    } else {
-      var file = srv.findFile(span.origin);
-      target.start = outputPos(query, file, span.node.start);
-      target.end = outputPos(query, file, span.node.end);
-    }
-  };
+    var argHints = ts.cachedArgHints;
+    if (argHints && argHints.doc == doc && cmpPos(argHints.start, change.to) >= 0)
+      ts.cachedArgHints = null;
 
-  function findDef(srv, query, file) {
-    var expr = findExpr(file, query);
-    var type = findExprType(srv, query, file, expr);
-    if (infer.didGuess()) return {};
+    var changed = data.changed;
+    if (changed == null)
+      data.changed = changed = {from: change.from.line, to: change.from.line};
+    var end = change.from.line + (change.text.length - 1);
+    if (change.from.line < changed.to) changed.to = changed.to - (change.to.line - end);
+    if (end >= changed.to) changed.to = end + 1;
+    if (changed.from > change.from.line) changed.from = change.from.line;
 
-    var span = getSpan(type);
-    var result = {url: type.url, doc: type.doc, origin: type.origin};
-
-    if (type.types) for (var i = type.types.length - 1; i >= 0; --i) {
-      var tp = type.types[i];
-      storeTypeDocs(tp, result);
-      if (!span) span = getSpan(tp);
-    }
-
-    if (span && span.node) { // refers to a loaded file
-      var spanFile = span.node.sourceFile || srv.findFile(span.origin);
-      var start = outputPos(query, spanFile, span.node.start), end = outputPos(query, spanFile, span.node.end);
-      result.start = start; result.end = end;
-      result.file = span.origin;
-      var cxStart = Math.max(0, span.node.start - 50);
-      result.contextOffset = span.node.start - cxStart;
-      result.context = spanFile.text.slice(cxStart, cxStart + 50);
-    } else if (span) { // external
-      result.file = span.origin;
-      storeSpan(srv, query, span, result);
-    }
-    return clean(result);
+    if (doc.lineCount() > bigDoc && change.to - changed.from > 100) setTimeout(function() {
+      if (data.changed && data.changed.to - data.changed.from > 100) sendDoc(ts, data);
+    }, 200);
   }
 
-  function findRefsToVariable(srv, query, file, expr, checkShadowing) {
-    var name = expr.node.name;
+  function sendDoc(ts, doc) {
+    ts.server.request({files: [{type: "full", name: doc.name, text: docValue(ts, doc)}]}, function(error) {
+      if (error) window.console.error(error);
+      else doc.changed = null;
+    });
+  }
 
-    for (var scope = expr.state; scope && !(name in scope.props); scope = scope.prev) {}
-    if (!scope) throw ternError("Could not find a definition for " + name + " " + !!srv.cx.topScope.props.x);
+  // Completion
 
-    var type, refs = [];
-    function storeRef(file) {
-      return function(node, scopeHere) {
-        if (checkShadowing) for (var s = scopeHere; s != scope; s = s.prev) {
-          var exists = s.hasProp(checkShadowing);
-          if (exists)
-            throw ternError("Renaming `" + name + "` to `" + checkShadowing + "` would make a variable at line " +
-                            (asLineChar(file, node.start).line + 1) + " point to the definition at line " +
-                            (asLineChar(file, exists.name.start).line + 1));
+  function hint(ts, cm, c) {
+    ts.request(cm, {type: "completions", types: true, docs: true, urls: true}, function(error, data) {
+      if (error) return showError(ts, cm, error);
+      var completions = [], after = "";
+      var from = data.start, to = data.end;
+      if (cm.getRange(Pos(from.line, from.ch - 2), from) == "[\"" &&
+          cm.getRange(to, Pos(to.line, to.ch + 2)) != "\"]")
+        after = "\"]";
+
+      for (var i = 0; i < data.completions.length; ++i) {
+        var completion = data.completions[i], className = typeToIcon(completion.type);
+        if (data.guess) className += " " + cls + "guess";
+        completions.push({text: completion.name + after,
+                          displayText: completion.displayName || completion.name,
+                          className: className,
+                          data: completion});
+      }
+
+      var obj = {from: from, to: to, list: completions};
+      var tooltip = null;
+      CodeMirror.on(obj, "close", function() { remove(tooltip); });
+      CodeMirror.on(obj, "update", function() { remove(tooltip); });
+      CodeMirror.on(obj, "select", function(cur, node) {
+        remove(tooltip);
+        var content = ts.options.completionTip ? ts.options.completionTip(cur.data) : cur.data.doc;
+        if (content) {
+          tooltip = makeTooltip(node.parentNode.getBoundingClientRect().right + window.pageXOffset,
+                                node.getBoundingClientRect().top + window.pageYOffset, content, cm, cls + "hint-doc");
         }
-        refs.push({file: file.name,
-                   start: outputPos(query, file, node.start),
-                   end: outputPos(query, file, node.end)});
+      });
+      c(obj);
+    });
+  }
+
+  function typeToIcon(type) {
+    var suffix;
+    if (type == "?") suffix = "unknown";
+    else if (type == "number" || type == "string" || type == "bool") suffix = type;
+    else if (/^fn\(/.test(type)) suffix = "fn";
+    else if (/^\[/.test(type)) suffix = "array";
+    else suffix = "object";
+    return cls + "completion " + cls + "completion-" + suffix;
+  }
+
+  // Type queries
+
+  function showContextInfo(ts, cm, pos, queryName, c) {
+    ts.request(cm, queryName, function(error, data) {
+      if (error) return showError(ts, cm, error);
+      if (ts.options.typeTip) {
+        var tip = ts.options.typeTip(data);
+      } else {
+        var tip = elt("span", null, elt("strong", null, data.type || "not found"));
+        if (data.doc)
+          tip.appendChild(document.createTextNode(" — " + data.doc));
+        if (data.url) {
+          tip.appendChild(document.createTextNode(" "));
+          var child = tip.appendChild(elt("a", null, "[docs]"));
+          child.href = data.url;
+          child.target = "_blank";
+        }
+      }
+      tempTooltip(cm, tip, ts);
+      if (c) c();
+    }, pos);
+  }
+
+  // Maintaining argument hints
+
+  function updateArgHints(ts, cm) {
+    closeArgHints(ts);
+
+    if (cm.somethingSelected()) return;
+    var state = cm.getTokenAt(cm.getCursor()).state;
+    var inner = CodeMirror.innerMode(cm.getMode(), state);
+    if (inner.mode.name != "javascript") return;
+    var lex = inner.state.lexical;
+    if (lex.info != "call") return;
+
+    var ch, argPos = lex.pos || 0, tabSize = cm.getOption("tabSize");
+    for (var line = cm.getCursor().line, e = Math.max(0, line - 9), found = false; line >= e; --line) {
+      var str = cm.getLine(line), extra = 0;
+      for (var pos = 0;;) {
+        var tab = str.indexOf("\t", pos);
+        if (tab == -1) break;
+        extra += tabSize - (tab + extra) % tabSize - 1;
+        pos = tab + 1;
+      }
+      ch = lex.column - extra;
+      if (str.charAt(ch) == "(") {found = true; break;}
+    }
+    if (!found) return;
+
+    var start = Pos(line, ch);
+    var cache = ts.cachedArgHints;
+    if (cache && cache.doc == cm.getDoc() && cmpPos(start, cache.start) == 0)
+      return showArgHints(ts, cm, argPos);
+
+    ts.request(cm, {type: "type", preferFunction: true, end: start}, function(error, data) {
+      if (error || !data.type || !(/^fn\(/).test(data.type)) return;
+      ts.cachedArgHints = {
+        start: start,
+        type: parseFnType(data.type),
+        name: data.exprName || data.name || "fn",
+        guess: data.guess,
+        doc: cm.getDoc()
       };
+      showArgHints(ts, cm, argPos);
+    });
+  }
+
+  function showArgHints(ts, cm, pos) {
+    closeArgHints(ts);
+
+    var cache = ts.cachedArgHints, tp = cache.type;
+    var tip = elt("span", cache.guess ? cls + "fhint-guess" : null,
+                  elt("span", cls + "fname", cache.name), "(");
+    for (var i = 0; i < tp.args.length; ++i) {
+      if (i) tip.appendChild(document.createTextNode(", "));
+      var arg = tp.args[i];
+      tip.appendChild(elt("span", cls + "farg" + (i == pos ? " " + cls + "farg-current" : ""), arg.name || "?"));
+      if (arg.type != "?") {
+        tip.appendChild(document.createTextNode(":\u00a0"));
+        tip.appendChild(elt("span", cls + "type", arg.type));
+      }
+    }
+    tip.appendChild(document.createTextNode(tp.rettype ? ") ->\u00a0" : ")"));
+    if (tp.rettype) tip.appendChild(elt("span", cls + "type", tp.rettype));
+    var place = cm.cursorCoords(null, "page");
+    var tooltip = ts.activeArgHints = makeTooltip(place.right + 1, place.bottom, tip, cm)
+    setTimeout(function() {
+      tooltip.clear = onEditorActivity(cm, function() {
+        if (ts.activeArgHints == tooltip) closeArgHints(ts) })
+    }, 20)
+  }
+
+  function parseFnType(text) {
+    var args = [], pos = 3;
+
+    function skipMatching(upto) {
+      var depth = 0, start = pos;
+      for (;;) {
+        var next = text.charAt(pos);
+        if (upto.test(next) && !depth) return text.slice(start, pos);
+        if (/[{\[\(]/.test(next)) ++depth;
+        else if (/[}\]\)]/.test(next)) --depth;
+        ++pos;
+      }
     }
 
-    if (scope.originNode) {
-      type = "local";
-      if (checkShadowing) {
-        for (var prev = scope.prev; prev; prev = prev.prev)
-          if (checkShadowing in prev.props) break;
-        if (prev) infer.findRefs(scope.originNode, scope, checkShadowing, prev, function(node) {
-          throw ternError("Renaming `" + name + "` to `" + checkShadowing + "` would shadow the definition used at line " +
-                          (asLineChar(file, node.start).line + 1));
-        });
+    // Parse arguments
+    if (text.charAt(pos) != ")") for (;;) {
+      var name = text.slice(pos).match(/^([^, \(\[\{]+): /);
+      if (name) {
+        pos += name[0].length;
+        name = name[1];
       }
-      infer.findRefs(scope.originNode, scope, name, scope, storeRef(file));
+      args.push({name: name, type: skipMatching(/[\),]/)});
+      if (text.charAt(pos) == ")") break;
+      pos += 2;
+    }
+
+    var rettype = text.slice(pos).match(/^\) -> (.*)$/);
+
+    return {args: args, rettype: rettype && rettype[1]};
+  }
+
+  // Moving to the definition of something
+
+  function jumpToDef(ts, cm) {
+    function inner(varName) {
+      var req = {type: "definition", variable: varName || null};
+      var doc = findDoc(ts, cm.getDoc());
+      ts.server.request(buildRequest(ts, doc, req), function(error, data) {
+        if (error) return showError(ts, cm, error);
+        if (!data.file && data.url) { window.open(data.url); return; }
+
+        if (data.file) {
+          var localDoc = ts.docs[data.file], found;
+          if (localDoc && (found = findContext(localDoc.doc, data))) {
+            ts.jumpStack.push({file: doc.name,
+                               start: cm.getCursor("from"),
+                               end: cm.getCursor("to")});
+            moveTo(ts, doc, localDoc, found.start, found.end);
+            return;
+          }
+        }
+        showError(ts, cm, "Could not find a definition.");
+      });
+    }
+
+    if (!atInterestingExpression(cm))
+      dialog(cm, "Jump to variable", function(name) { if (name) inner(name); });
+    else
+      inner();
+  }
+
+  function jumpBack(ts, cm) {
+    var pos = ts.jumpStack.pop(), doc = pos && ts.docs[pos.file];
+    if (!doc) return;
+    moveTo(ts, findDoc(ts, cm.getDoc()), doc, pos.start, pos.end);
+  }
+
+  function moveTo(ts, curDoc, doc, start, end) {
+    doc.doc.setSelection(start, end);
+    if (curDoc != doc && ts.options.switchToDoc) {
+      closeArgHints(ts);
+      ts.options.switchToDoc(doc.name, doc.doc);
+    }
+  }
+
+  // The {line,ch} representation of positions makes this rather awkward.
+  function findContext(doc, data) {
+    var before = data.context.slice(0, data.contextOffset).split("\n");
+    var startLine = data.start.line - (before.length - 1);
+    var start = Pos(startLine, (before.length == 1 ? data.start.ch : doc.getLine(startLine).length) - before[0].length);
+
+    var text = doc.getLine(startLine).slice(start.ch);
+    for (var cur = startLine + 1; cur < doc.lineCount() && text.length < data.context.length; ++cur)
+      text += "\n" + doc.getLine(cur);
+    if (text.slice(0, data.context.length) == data.context) return data;
+
+    var cursor = doc.getSearchCursor(data.context, 0, false);
+    var nearest, nearestDist = Infinity;
+    while (cursor.findNext()) {
+      var from = cursor.from(), dist = Math.abs(from.line - start.line) * 10000;
+      if (!dist) dist = Math.abs(from.ch - start.ch);
+      if (dist < nearestDist) { nearest = from; nearestDist = dist; }
+    }
+    if (!nearest) return null;
+
+    if (before.length == 1)
+      nearest.ch += before[0].length;
+    else
+      nearest = Pos(nearest.line + (before.length - 1), before[before.length - 1].length);
+    if (data.start.line == data.end.line)
+      var end = Pos(nearest.line, nearest.ch + (data.end.ch - data.start.ch));
+    else
+      var end = Pos(nearest.line + (data.end.line - data.start.line), data.end.ch);
+    return {start: nearest, end: end};
+  }
+
+  function atInterestingExpression(cm) {
+    var pos = cm.getCursor("end"), tok = cm.getTokenAt(pos);
+    if (tok.start < pos.ch && tok.type == "comment") return false;
+    return /[\w)\]]/.test(cm.getLine(pos.line).slice(Math.max(pos.ch - 1, 0), pos.ch + 1));
+  }
+
+  // Variable renaming
+
+  function rename(ts, cm) {
+    var token = cm.getTokenAt(cm.getCursor());
+    if (!/\w/.test(token.string)) return showError(ts, cm, "Not at a variable");
+    dialog(cm, "New name for " + token.string, function(newName) {
+      ts.request(cm, {type: "rename", newName: newName, fullDocs: true}, function(error, data) {
+        if (error) return showError(ts, cm, error);
+        applyChanges(ts, data.changes);
+      });
+    });
+  }
+
+  function selectName(ts, cm) {
+    var name = findDoc(ts, cm.doc).name;
+    ts.request(cm, {type: "refs"}, function(error, data) {
+      if (error) return showError(ts, cm, error);
+      var ranges = [], cur = 0;
+      var curPos = cm.getCursor();
+      for (var i = 0; i < data.refs.length; i++) {
+        var ref = data.refs[i];
+        if (ref.file == name) {
+          ranges.push({anchor: ref.start, head: ref.end});
+          if (cmpPos(curPos, ref.start) >= 0 && cmpPos(curPos, ref.end) <= 0)
+            cur = ranges.length - 1;
+        }
+      }
+      cm.setSelections(ranges, cur);
+    });
+  }
+
+  var nextChangeOrig = 0;
+  function applyChanges(ts, changes) {
+    var perFile = Object.create(null);
+    for (var i = 0; i < changes.length; ++i) {
+      var ch = changes[i];
+      (perFile[ch.file] || (perFile[ch.file] = [])).push(ch);
+    }
+    for (var file in perFile) {
+      var known = ts.docs[file], chs = perFile[file];;
+      if (!known) continue;
+      chs.sort(function(a, b) { return cmpPos(b.start, a.start); });
+      var origin = "*rename" + (++nextChangeOrig);
+      for (var i = 0; i < chs.length; ++i) {
+        var ch = chs[i];
+        known.doc.replaceRange(ch.text, ch.start, ch.end, origin);
+      }
+    }
+  }
+
+  // Generic request-building helper
+
+  function buildRequest(ts, doc, query, pos) {
+    var files = [], offsetLines = 0, allowFragments = !query.fullDocs;
+    if (!allowFragments) delete query.fullDocs;
+    if (typeof query == "string") query = {type: query};
+    query.lineCharPositions = true;
+    if (query.end == null) {
+      query.end = pos || doc.doc.getCursor("end");
+      if (doc.doc.somethingSelected())
+        query.start = doc.doc.getCursor("start");
+    }
+    var startPos = query.start || query.end;
+
+    if (doc.changed) {
+      if (doc.doc.lineCount() > bigDoc && allowFragments !== false &&
+          doc.changed.to - doc.changed.from < 100 &&
+          doc.changed.from <= startPos.line && doc.changed.to > query.end.line) {
+        files.push(getFragmentAround(doc, startPos, query.end));
+        query.file = "#0";
+        var offsetLines = files[0].offsetLines;
+        if (query.start != null) query.start = Pos(query.start.line - -offsetLines, query.start.ch);
+        query.end = Pos(query.end.line - offsetLines, query.end.ch);
+      } else {
+        files.push({type: "full",
+                    name: doc.name,
+                    text: docValue(ts, doc)});
+        query.file = doc.name;
+        doc.changed = null;
+      }
     } else {
-      type = "global";
-      for (var i = 0; i < srv.files.length; ++i) {
-        var cur = srv.files[i];
-        infer.findRefs(cur.ast, cur.scope, name, scope, storeRef(cur));
+      query.file = doc.name;
+    }
+    for (var name in ts.docs) {
+      var cur = ts.docs[name];
+      if (cur.changed && cur != doc) {
+        files.push({type: "full", name: cur.name, text: docValue(ts, cur)});
+        cur.changed = null;
       }
     }
 
-    return {refs: refs, type: type, name: name};
+    return {query: query, files: files};
   }
 
-  function findRefsToProperty(srv, query, expr, prop) {
-    var objType = infer.expressionType(expr).getObjType();
-    if (!objType) throw ternError("Couldn't determine type of base object.");
-
-    var refs = [];
-    function storeRef(file) {
-      return function(node) {
-        refs.push({file: file.name,
-                   start: outputPos(query, file, node.start),
-                   end: outputPos(query, file, node.end)});
-      };
+  function getFragmentAround(data, start, end) {
+    var doc = data.doc;
+    var minIndent = null, minLine = null, endLine, tabSize = 4;
+    for (var p = start.line - 1, min = Math.max(0, p - 50); p >= min; --p) {
+      var line = doc.getLine(p), fn = line.search(/\bfunction\b/);
+      if (fn < 0) continue;
+      var indent = CodeMirror.countColumn(line, null, tabSize);
+      if (minIndent != null && minIndent <= indent) continue;
+      minIndent = indent;
+      minLine = p;
     }
-    for (var i = 0; i < srv.files.length; ++i) {
-      var cur = srv.files[i];
-      infer.findPropRefs(cur.ast, cur.scope, objType, prop.name, storeRef(cur));
+    if (minLine == null) minLine = min;
+    var max = Math.min(doc.lastLine(), end.line + 20);
+    if (minIndent == null || minIndent == CodeMirror.countColumn(doc.getLine(start.line), null, tabSize))
+      endLine = max;
+    else for (endLine = end.line + 1; endLine < max; ++endLine) {
+      var indent = CodeMirror.countColumn(doc.getLine(endLine), null, tabSize);
+      if (indent <= minIndent) break;
     }
+    var from = Pos(minLine, 0);
 
-    return {refs: refs, name: prop.name};
+    return {type: "part",
+            name: data.name,
+            offsetLines: from.line,
+            text: doc.getRange(from, Pos(endLine, end.line == endLine ? null : 0))};
   }
 
-  function findRefs(srv, query, file) {
-    var expr = findExprOrThrow(file, query, true);
-    if (expr.node.type == "Identifier") {
-      return findRefsToVariable(srv, query, file, expr);
-    } else if (expr.node.type == "MemberExpression" && !expr.node.computed) {
-      var p = expr.node.property;
-      expr.node = expr.node.object;
-      return findRefsToProperty(srv, query, expr, p);
-    } else if (expr.node.type == "ObjectExpression") {
-      var pos = resolvePos(file, query.end);
-      for (var i = 0; i < expr.node.properties.length; ++i) {
-        var k = expr.node.properties[i].key;
-        if (k.start <= pos && k.end >= pos)
-          return findRefsToProperty(srv, query, expr, k);
+  // Generic utilities
+
+  var cmpPos = CodeMirror.cmpPos;
+
+  function elt(tagname, cls /*, ... elts*/) {
+    var e = document.createElement(tagname);
+    if (cls) e.className = cls;
+    for (var i = 2; i < arguments.length; ++i) {
+      var elt = arguments[i];
+      if (typeof elt == "string") elt = document.createTextNode(elt);
+      e.appendChild(elt);
+    }
+    return e;
+  }
+
+  function dialog(cm, text, f) {
+    if (cm.openDialog)
+      cm.openDialog(text + ": <input type=text>", f);
+    else
+      f(prompt(text, ""));
+  }
+
+  // Tooltips
+
+  function tempTooltip(cm, content, ts) {
+    if (cm.state.ternTooltip) remove(cm.state.ternTooltip);
+    var where = cm.cursorCoords();
+    var tip = cm.state.ternTooltip = makeTooltip(where.right + 1, where.bottom, content, cm);
+    function maybeClear() {
+      old = true;
+      if (!mouseOnTip) clear();
+    }
+    function clear() {
+      cm.state.ternTooltip = null;
+      if (tip.parentNode) fadeOut(tip)
+      clearActivity()
+    }
+    var mouseOnTip = false, old = false;
+    CodeMirror.on(tip, "mousemove", function() { mouseOnTip = true; });
+    CodeMirror.on(tip, "mouseout", function(e) {
+      var related = e.relatedTarget || e.toElement
+      if (!related || !CodeMirror.contains(tip, related)) {
+        if (old) clear();
+        else mouseOnTip = false;
+      }
+    });
+    setTimeout(maybeClear, ts.options.hintDelay ? ts.options.hintDelay : 1700);
+    var clearActivity = onEditorActivity(cm, clear)
+  }
+
+  function onEditorActivity(cm, f) {
+    cm.on("cursorActivity", f)
+    cm.on("blur", f)
+    cm.on("scroll", f)
+    cm.on("setDoc", f)
+    return function() {
+      cm.off("cursorActivity", f)
+      cm.off("blur", f)
+      cm.off("scroll", f)
+      cm.off("setDoc", f)
+    }
+  }
+
+  function makeTooltip(x, y, content, cm, className) {
+    var node = elt("div", cls + "tooltip" + " " + (className || ""), content);
+    node.style.left = x + "px";
+    node.style.top = y + "px";
+    var container = ((cm.options || {}).hintOptions || {}).container || document.body;
+    container.appendChild(node);
+
+    var pos = cm.cursorCoords();
+    var winW = window.innerWidth;
+    var winH = window.innerHeight;
+    var box = node.getBoundingClientRect();
+    var hints = document.querySelector(".CodeMirror-hints");
+    var overlapY = box.bottom - winH;
+    var overlapX = box.right - winW;
+
+    if (hints && overlapX > 0) {
+      node.style.left = 0;
+      var box = node.getBoundingClientRect();
+      node.style.left = (x = x - hints.offsetWidth - box.width) + "px";
+      overlapX = box.right - winW;
+    }
+    if (overlapY > 0) {
+      var height = box.bottom - box.top, curTop = pos.top - (pos.bottom - box.top);
+      if (curTop - height > 0) { // Fits above cursor
+        node.style.top = (pos.top - height) + "px";
+      } else if (height > winH) {
+        node.style.height = (winH - 5) + "px";
+        node.style.top = (pos.bottom - box.top) + "px";
       }
     }
-    throw ternError("Not at a variable or property name.");
-  }
-
-  function buildRename(srv, query, file) {
-    if (typeof query.newName != "string") throw ternError(".query.newName should be a string");
-    var expr = findExprOrThrow(file, query);
-    if (!expr || expr.node.type != "Identifier") throw ternError("Not at a variable.");
-
-    var data = findRefsToVariable(srv, query, file, expr, query.newName), refs = data.refs;
-    delete data.refs;
-    data.files = srv.files.map(function(f){return f.name;});
-
-    var changes = data.changes = [];
-    for (var i = 0; i < refs.length; ++i) {
-      var use = refs[i];
-      use.text = query.newName;
-      changes.push(use);
+    if (overlapX > 0) {
+      if (box.right - box.left > winW) {
+        node.style.width = (winW - 5) + "px";
+        overlapX -= (box.right - box.left) - winW;
+      }
+      node.style.left = (x - overlapX) + "px";
     }
 
-    return data;
+    return node;
   }
 
-  function listFiles(srv) {
-    return {files: srv.files.map(function(f){return f.name;})};
+  function remove(node) {
+    var p = node && node.parentNode;
+    if (p) p.removeChild(node);
   }
 
-  exports.version = "0.11.1";
+  function fadeOut(tooltip) {
+    tooltip.style.opacity = "0";
+    setTimeout(function() { remove(tooltip); }, 1100);
+  }
+
+  function showError(ts, cm, msg) {
+    if (ts.options.showError)
+      ts.options.showError(cm, msg);
+    else
+      tempTooltip(cm, String(msg), ts);
+  }
+
+  function closeArgHints(ts) {
+    if (ts.activeArgHints) {
+      if (ts.activeArgHints.clear) ts.activeArgHints.clear()
+      remove(ts.activeArgHints)
+      ts.activeArgHints = null
+    }
+  }
+
+  function docValue(ts, doc) {
+    var val = doc.doc.getValue();
+    if (ts.options.fileFilter) val = ts.options.fileFilter(val, doc.name, doc.doc);
+    return val;
+  }
+
+  // Worker wrapper
+
+  function WorkerServer(ts) {
+    var worker = ts.worker = new Worker(ts.options.workerScript);
+    worker.postMessage({type: "init",
+                        defs: ts.options.defs,
+                        plugins: ts.options.plugins,
+                        scripts: ts.options.workerDeps});
+    var msgId = 0, pending = {};
+
+    function send(data, c) {
+      if (c) {
+        data.id = ++msgId;
+        pending[msgId] = c;
+      }
+      worker.postMessage(data);
+    }
+    worker.onmessage = function(e) {
+      var data = e.data;
+      if (data.type == "getFile") {
+        getFile(ts, data.name, function(err, text) {
+          send({type: "getFile", err: String(err), text: text, id: data.id});
+        });
+      } else if (data.type == "debug") {
+        window.console.log(data.message);
+      } else if (data.id && pending[data.id]) {
+        pending[data.id](data.err, data.body);
+        delete pending[data.id];
+      }
+    };
+    worker.onerror = function(e) {
+      for (var id in pending) pending[id](e);
+      pending = {};
+    };
+
+    this.addFile = function(name, text) { send({type: "add", name: name, text: text}); };
+    this.delFile = function(name) { send({type: "del", name: name}); };
+    this.request = function(body, c) { send({type: "req", body: body}, c); };
+  }
 });

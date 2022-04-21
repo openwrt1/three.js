@@ -1,73 +1,62 @@
-import {
-	FileLoader,
-	Loader,
-	CanvasTexture,
-	NearestFilter
-} from 'three';
+( function () {
 
-class LottieLoader extends Loader {
+	class LottieLoader extends THREE.Loader {
 
-	setQuality( value ) {
+		setQuality( value ) {
 
-		this._quality = value;
+			this._quality = value;
 
-	}
+		}
 
-	load( url, onLoad, onProgress, onError ) {
+		load( url, onLoad, onProgress, onError ) {
 
-		const quality = this._quality || 1;
+			const quality = this._quality || 1;
+			const texture = new THREE.CanvasTexture();
+			texture.minFilter = THREE.NearestFilter;
+			const loader = new THREE.FileLoader( this.manager );
+			loader.setPath( this.path );
+			loader.setWithCredentials( this.withCredentials );
+			loader.load( url, function ( text ) {
 
-		const texture = new CanvasTexture();
-		texture.minFilter = NearestFilter;
+				const data = JSON.parse( text ); // bodymoving uses container.offetWidth and offsetHeight
+				// to define width/height
 
-		const loader = new FileLoader( this.manager );
-		loader.setPath( this.path );
-		loader.setWithCredentials( this.withCredentials );
+				const container = document.createElement( 'div' );
+				container.style.width = data.w + 'px';
+				container.style.height = data.h + 'px';
+				document.body.appendChild( container );
+				const animation = bodymovin.loadAnimation( {
+					container: container,
+					animType: 'canvas',
+					loop: true,
+					autoplay: true,
+					animationData: data,
+					rendererSettings: {
+						dpr: quality
+					}
+				} );
+				texture.animation = animation;
+				texture.image = animation.container;
+				animation.addEventListener( 'enterFrame', function () {
 
-		loader.load( url, function ( text ) {
+					texture.needsUpdate = true;
 
-			const data = JSON.parse( text );
+				} );
+				container.style.display = 'none';
 
-			// bodymoving uses container.offetWidth and offsetHeight
-			// to define width/height
+				if ( onLoad !== undefined ) {
 
-			const container = document.createElement( 'div' );
-			container.style.width = data.w + 'px';
-			container.style.height = data.h + 'px';
-			document.body.appendChild( container );
+					onLoad( texture );
 
-			const animation = bodymovin.loadAnimation( {
-				container: container,
-				animType: 'canvas',
-				loop: true,
-				autoplay: true,
-				animationData: data,
-				rendererSettings: { dpr: quality }
-			} );
+				}
 
-			texture.animation = animation;
-			texture.image = animation.container;
+			}, onProgress, onError );
+			return texture;
 
-			animation.addEventListener( 'enterFrame', function () {
-
-				texture.needsUpdate = true;
-
-			} );
-
-			container.style.display = 'none';
-
-			if ( onLoad !== undefined ) {
-
-				onLoad( texture );
-
-			}
-
-		}, onProgress, onError );
-
-		return texture;
+		}
 
 	}
 
-}
+	THREE.LottieLoader = LottieLoader;
 
-export { LottieLoader };
+} )();

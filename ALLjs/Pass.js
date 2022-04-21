@@ -1,80 +1,75 @@
-import {
-	BufferGeometry,
-	Float32BufferAttribute,
-	OrthographicCamera,
-	Mesh
-} from 'three';
+( function () {
 
-class Pass {
+	class Pass {
 
-	constructor() {
+		constructor() {
 
-		// if set to true, the pass is processed by the composer
-		this.enabled = true;
+			// if set to true, the pass is processed by the composer
+			this.enabled = true; // if set to true, the pass indicates to swap read and write buffer after rendering
 
-		// if set to true, the pass indicates to swap read and write buffer after rendering
-		this.needsSwap = true;
+			this.needsSwap = true; // if set to true, the pass clears its buffer before rendering
 
-		// if set to true, the pass clears its buffer before rendering
-		this.clear = false;
+			this.clear = false; // if set to true, the result of the pass is rendered to screen. This is set automatically by EffectComposer.
 
-		// if set to true, the result of the pass is rendered to screen. This is set automatically by EffectComposer.
-		this.renderToScreen = false;
+			this.renderToScreen = false;
 
-	}
+		}
 
-	setSize( /* width, height */ ) {}
+		setSize() {}
 
-	render( /* renderer, writeBuffer, readBuffer, deltaTime, maskActive */ ) {
+		render() {
 
-		console.error( 'THREE.Pass: .render() must be implemented in derived pass.' );
+			console.error( 'THREE.Pass: .render() must be implemented in derived pass.' );
 
-	}
+		}
 
-}
+	} // Helper for passes that need to fill the viewport with a single quad.
 
-// Helper for passes that need to fill the viewport with a single quad.
 
-const _camera = new OrthographicCamera( - 1, 1, 1, - 1, 0, 1 );
+	const _camera = new THREE.OrthographicCamera( - 1, 1, 1, - 1, 0, 1 ); // https://github.com/mrdoob/three.js/pull/21358
 
-// https://github.com/mrdoob/three.js/pull/21358
 
-const _geometry = new BufferGeometry();
-_geometry.setAttribute( 'position', new Float32BufferAttribute( [ - 1, 3, 0, - 1, - 1, 0, 3, - 1, 0 ], 3 ) );
-_geometry.setAttribute( 'uv', new Float32BufferAttribute( [ 0, 2, 0, 0, 2, 0 ], 2 ) );
+	const _geometry = new THREE.BufferGeometry();
 
-class FullScreenQuad {
+	_geometry.setAttribute( 'position', new THREE.Float32BufferAttribute( [ - 1, 3, 0, - 1, - 1, 0, 3, - 1, 0 ], 3 ) );
 
-	constructor( material ) {
+	_geometry.setAttribute( 'uv', new THREE.Float32BufferAttribute( [ 0, 2, 0, 0, 2, 0 ], 2 ) );
 
-		this._mesh = new Mesh( _geometry, material );
+	class FullScreenQuad {
 
-	}
+		constructor( material ) {
 
-	dispose() {
+			this._mesh = new THREE.Mesh( _geometry, material );
 
-		this._mesh.geometry.dispose();
+		}
 
-	}
+		dispose() {
 
-	render( renderer ) {
+			this._mesh.geometry.dispose();
 
-		renderer.render( this._mesh, _camera );
+		}
 
-	}
+		render( renderer ) {
 
-	get material() {
+			renderer.render( this._mesh, _camera );
 
-		return this._mesh.material;
+		}
 
-	}
+		get material() {
 
-	set material( value ) {
+			return this._mesh.material;
 
-		this._mesh.material = value;
+		}
+
+		set material( value ) {
+
+			this._mesh.material = value;
+
+		}
 
 	}
 
-}
+	THREE.FullScreenQuad = FullScreenQuad;
+	THREE.Pass = Pass;
 
-export { Pass, FullScreenQuad };
+} )();
